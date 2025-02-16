@@ -4,6 +4,8 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 from zonos.config import BackboneConfig, InferenceParams
+from flash_attn import flash_attn_func, flash_attn_varlen_func
+import math
 
 
 def precompute_freqs_cis(seq_len: int, n_elem: int, base: float = 10000) -> torch.Tensor:
@@ -133,13 +135,40 @@ class Attention(nn.Module):
 
         q, k, v = map(lambda x: x.transpose(1, 2), (q, k, v))
 
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=seqlen > 1, enable_gqa=True)
+        num_q_heads = q.size(1)
+        num_kv_heads = k.size(1)
+        groups = num_q_heads // num_kv_heads
 
-        y = y.transpose(1, 2).contiguous().view(batch_size, seqlen, q_size)
+        q = q.view(batch_size, num_kv_heads, groups, seqlen, self.head_dim)
+        k = k.unsqueeze(2)
+        v = v.unsqueeze(2)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+
+        if seqlen > 1:
+            causal_mask = torch.tril(torch.ones((seqlen, seqlen), dtype=torch.bool, device=scores.device))
+            scores = scores.masked_fill(~causal_mask.view(1, 1, 1, seqlen, seqlen), float('-inf'))
+
+        if inference_params.left_hand_padding_sizes is not None:
+            if inference_params.left_hand_padding_sizes.device != scores.device:
+                inference_params.left_hand_padding_sizes = inference_params.left_hand_padding_sizes.to(scores.device)
+
+            indices = torch.arange(seqlen, device=scores.device)
+            indices = indices.expand(batch_size, -1)
+            padding_sizes = inference_params.left_hand_padding_sizes.view(-1, 1)
+            key_padding_mask = indices >= padding_sizes
+            key_padding_mask = key_padding_mask.view(batch_size, 1, 1, 1, seqlen)
+            scores = scores.masked_fill(~key_padding_mask, float('-inf'))
+
+        attn_weights = torch.softmax(scores, dim=-1)
+
+        attn_output = torch.matmul(attn_weights, v)
+        attn_output = attn_output.view(batch_size, num_q_heads, seqlen, self.head_dim)
+        q_size = num_q_heads * self.head_dim
+        y = attn_output.transpose(1, 2).contiguous().view(batch_size, seqlen, q_size)
 
         y = self.out_proj(y)
         return y
-
 
 class FeedForward(nn.Module):
     def __init__(self, config: BackboneConfig) -> None:

@@ -40,7 +40,7 @@ Zonos follows a straightforward architecture: text normalization and phonemizati
 
 ## Usage
 
-### Python
+### Python (Original way to use it)
 
 ```python
 import torch
@@ -62,6 +62,41 @@ codes = model.generate(conditioning)
 
 wavs = model.autoencoder.decode(codes).cpu()
 torchaudio.save("sample.wav", wavs[0], model.autoencoder.sampling_rate)
+```
+
+### Python (Batched way in this branch to use it)
+
+#### Some important notes
+This is a badly implemented batched version of the original inference code, optimized for higher batch scenarios. If you are in a single user live setting or have a setup with a smaller batch size, please use the original single batch implementation.
+The current implementation deactivates the CUDA graph caching and swaps out the faster torch.scaled_dot_product_attention for a slower torch.softmax one, this was done because scaled_dot_product_attention does not support attention mask for causal setting. A future option would be to use proper block sparse flash attention.
+
+With a large batch size of 48, the batched implementation runs at 6X real time on a single 3090 GPU vs the original single implementation which only runs at 2X real time on a single 4090.
+The current multi-batch implementation was only tested for transformer models, not hybrid ones, but it still may run.
+
+
+```python
+import torchaudio
+from zonos.model import Zonos
+from zonos.conditioning import make_cond_dict
+from zonos.utils import DEFAULT_DEVICE as device
+
+model = Zonos.from_pretrained("Zyphra/Zonos-v0.1-transformer", device=device)
+
+wav, sampling_rate = torchaudio.load("assets/exampleaudio.mp3")
+speaker = model.make_speaker_embedding(wav, sampling_rate)
+
+cond_dicts = []
+cond_dicts.append(make_cond_dict(text="Hello, world!", speaker=speaker, language="en-us"))
+cond_dicts.append(make_cond_dict(text="Hello, world! I LOVE COOKIES", speaker=speaker, language="en-us"))
+
+# Use the prepare_conditioning_batch to stack and pad the individual task items.
+conditioning, left_hand_padding_sizes = model.prepare_conditioning_batch(cond_dicts)
+
+# Returns in the batch setting a list of tensors, not a monolithic one.
+codes = model.generate(conditioning, batch_size = len(cond_dicts), left_hand_padding_sizes=left_hand_padding_sizes)
+
+torchaudio.save("sample_1.wav", model.autoencoder.decode(codes[0])[0].cpu(), model.autoencoder.sampling_rate)
+torchaudio.save("sample_2.wav", model.autoencoder.decode(codes[1])[0].cpu(), model.autoencoder.sampling_rate)
 ```
 
 ### Gradio interface (recommended)
