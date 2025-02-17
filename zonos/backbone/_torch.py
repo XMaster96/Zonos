@@ -153,14 +153,15 @@ class Attention(nn.Module):
             if inference_params.left_hand_padding_sizes.device != scores.device:
                 inference_params.left_hand_padding_sizes = inference_params.left_hand_padding_sizes.to(scores.device)
 
-            indices = torch.arange(seqlen, device=scores.device)
+            indices = torch.arange(scores.size(-1), device=scores.device)
             indices = indices.expand(batch_size, -1)
             padding_sizes = inference_params.left_hand_padding_sizes.view(-1, 1)
             key_padding_mask = indices >= padding_sizes
-            key_padding_mask = key_padding_mask.view(batch_size, 1, 1, 1, seqlen)
+            key_padding_mask = key_padding_mask.view(batch_size, 1, 1, 1, scores.size(-1))
             scores = scores.masked_fill(~key_padding_mask, float('-inf'))
 
         attn_weights = torch.softmax(scores, dim=-1)
+        attn_weights[torch.isnan(attn_weights)] = 0
 
         attn_output = torch.matmul(attn_weights, v)
         attn_output = attn_output.view(batch_size, num_q_heads, seqlen, self.head_dim)

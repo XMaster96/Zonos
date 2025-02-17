@@ -214,13 +214,20 @@ class Zonos(nn.Module):
             ]
         )
 
-    def prepare_conditioning_batch(self, cond_dicts: list[dict], uncond_dicts: list[dict | None] | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    def prepare_conditioning_batch(
+            self,
+            cond_dicts: list[dict],
+            uncond_dicts: list[dict | None] | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
 
         if uncond_dicts is None:
-            uncond_dicts = [{k: cond_dict[k] for k in self.prefix_conditioner.required_keys} for cond_dict in cond_dicts]
+            uncond_dicts = [
+                {k: cond_dict[k] for k in self.prefix_conditioner.required_keys}
+                for cond_dict in cond_dicts
+            ]
         else:
             uncond_dicts_ = []
-            for (cond_dict, uncond_dict) in zip(cond_dicts, uncond_dicts):
+            for cond_dict, uncond_dict in zip(cond_dicts, uncond_dicts):
                 if uncond_dict is None:
                     uncond_dicts_.append({k: cond_dict[k] for k in self.prefix_conditioner.required_keys})
                 else:
@@ -229,34 +236,30 @@ class Zonos(nn.Module):
 
         cond_list: list[torch.Tensor] = []
         uncond_list: list[torch.Tensor] = []
-        for (cond_dict, uncond_dict) in zip(cond_dicts, uncond_dicts):
+        for cond_dict, uncond_dict in zip(cond_dicts, uncond_dicts):
             cond_list.append(self.prefix_conditioner(cond_dict))
             uncond_list.append(self.prefix_conditioner(uncond_dict))
 
         all_tensors = cond_list + uncond_list
-
         max_seq_len = max(tensor.size(1) for tensor in all_tensors)
         hidden_dim = all_tensors[0].size(2)
 
         padded_tensors = []
-        padding_sizes = []
+        left_padding_sizes = []
 
         for tensor in all_tensors:
             curr_seq_len = tensor.size(1)
-            left_pad_size = 0 if curr_seq_len == max_seq_len else max_seq_len - curr_seq_len
-
-            if curr_seq_len < max_seq_len:
-                padding = torch.zeros(1, max_seq_len - curr_seq_len, hidden_dim,
-                                      dtype=tensor.dtype, device=tensor.device)
-                tensor = torch.cat([tensor, padding], dim=1)
-
+            left_pad_size = max_seq_len - curr_seq_len
+            if left_pad_size > 0:
+                padding = torch.zeros(1, left_pad_size, hidden_dim, dtype=tensor.dtype, device=tensor.device)
+                tensor = torch.cat([padding, tensor], dim=1)
             padded_tensors.append(tensor)
-            padding_sizes.append(left_pad_size)
+            left_padding_sizes.append(left_pad_size)
 
-        padded_batch = torch.cat(padded_tensors)
-        left_hand_padding_sizes = torch.tensor(padding_sizes, dtype=torch.int32)
+        padded_batch = torch.cat(padded_tensors, dim=0)
+        left_padding_sizes_tensor = torch.tensor(left_padding_sizes, dtype=torch.int32, device=padded_batch.device)
 
-        return padded_batch, left_hand_padding_sizes
+        return padded_batch, left_padding_sizes_tensor
 
     def can_use_cudagraphs(self) -> bool:
         # Only the mamba-ssm backbone supports CUDA Graphs at the moment
